@@ -1,254 +1,189 @@
 <!-- frontend/src/views/TasksView.vue -->
 <template>
-    <div class="tasks-view">
-        <h1>任务模板管理</h1>
-        
-        <!-- 添加/修改任务模板的表单 -->
-        <div class="card">
-            <h2>添加新任务模板</h2>
-            <form @submit.prevent="addTask">
-                <!-- 基础信息 -->
-                <div class="form-group">
-                    <label for="task-name">任务名称</label>
-                    <input id="task-name" type="text" v-model="newTask.name" placeholder="如：深渊挑战" required>
-                </div>
-                <div class="form-group">
-                    <label for="task-type">任务大类</label>
-                    <select id="task-type" v-model="newTask.type" required>
-                        <option disabled value="">选择任务大类</option>
-                        <option value="daily">日常任务</option>
-                        <option value="weekly">周常任务</option>
-                        <option value="version">版本/活动任务</option>
-                    </select>
-                </div>
+  <div class="tasks-view">
+    <h1>任务模板构造器</h1>
+    
+    <div class="card">
+      <h2>添加新任务模板</h2>
+      <form @submit.prevent="addTask">
+        <!-- 基础信息 -->
+        <fieldset>
+          <legend>1. 基础信息</legend>
+          <div class="form-group">
+            <label>任务名称</label>
+            <input type="text" v-model="form.name" placeholder="如：量子深渊" required>
+          </div>
+          <div class="form-group">
+            <label>分类 (用于看板分组)</label>
+            <input type="text" v-model="form.category" placeholder="如：周常">
+          </div>
+        </fieldset>
 
-                <hr class="form-divider">
+        <!-- 调度规则 -->
+        <fieldset>
+          <legend>2. 调度规则 (任务何时出现?)</legend>
+          <select v-model="form.schedule_rule.type" required>
+            <option value="daily">每日</option>
+            <option value="weekly">每周 (活动窗口)</option>
+            <option value="date_range">固定日期范围</option>
+          </select>
+          
+          <div v-if="form.schedule_rule.type === 'daily'" class="config-box">
+            <label>每日刷新时间 (小时)</label>
+            <input type="number" v-model.number="form.schedule_rule.config.reset_hour" min="0" max="23">
+          </div>
+          <div v-if="form.schedule_rule.type === 'weekly'" class="config-box">
+            <label>开始于:</label>
+            <select v-model.number="form.schedule_rule.config.start.day">
+              <!-- FIX: Added :key="d" -->
+              <option v-for="d in 7" :key="d" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+            </select>
+            <input type="number" v-model.number="form.schedule_rule.config.start.hour" min="0" max="23"> 时
+            <label>结束于:</label>
+            <select v-model.number="form.schedule_rule.config.end.day">
+              <!-- FIX: Added :key="d" -->
+              <option v-for="d in 7" :key="d" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+            </select>
+            <input type="number" v-model.number="form.schedule_rule.config.end.hour" min="0" max="23"> 时
+          </div>
+          <div v-if="form.schedule_rule.type === 'date_range'" class="config-box">
+            <label>开始日期时间</label>
+            <input type="datetime-local" v-model="form.schedule_rule.config.start">
+            <label>结束日期时间</label>
+            <input type="datetime-local" v-model="form.schedule_rule.config.end">
+          </div>
+        </fieldset>
 
-                <!-- 规则配置 -->
-                <div class="form-group">
-                    <label for="schedule-type">调度规则类型</label>
-                    <select id="schedule-type" v-model="newTask.schedule_type" required>
-                        <option disabled value="">选择调度规则</option>
-                        <option value="daily">每日刷新</option>
-                        <option value="simple_weekly">简单周常 (按周重置)</option>
-                        <option value="multi_period">复杂周常 (周内多阶段)</option>
-                    </select>
-                </div>
+        <!-- 追踪方式 -->
+        <fieldset>
+          <legend>3. 追踪方式 (如何算完成?)</legend>
+          <select v-model="form.tracking_mode" required>
+            <option value="boolean">布尔型 (完成/未完成)</option>
+            <option value="counter">计数型</option>
+            <option value="round_based_counter">轮次计数型 (处理“任务债务”)</option>
+          </select>
 
-                <!-- 动态显示的配置输入和帮助信息 -->
-                <div v-if="newTask.schedule_type" class="form-group">
-                    <label for="schedule-config">调度规则配置 (JSON格式)</label>
-                    <div v-if="newTask.schedule_type === 'simple_weekly'" class="config-helper">
-                        <p><strong>示例 (记忆战场):</strong> 周二凌晨4点重置。</p>
-                        <pre>{"reset_day_of_week": 2, "reset_hour": 4}</pre>
-                    </div>
-                    <div v-if="newTask.schedule_type === 'multi_period'" class="config-helper">
-                        <p><strong>示例 (深渊):</strong> 周一15:00-周三22:00, 周五15:00-周日22:00。</p>
-                        <pre>{"periods": [{"start": {"day": 1, "hour": 15}, "end": {"day": 3, "hour": 22}}, {"start": {"day": 5, "hour": 15}, "end": {"day": 7, "hour": 22}}]}</pre>
-                    </div>
-                    <textarea id="schedule-config" v-model="newTask.schedule_config" rows="5" placeholder="根据上面的示例填写JSON，或留空"></textarea>
-                </div>
-                
-                <hr class="form-divider">
-
-                <!-- 追踪方式 -->
-                <div class="form-group">
-                    <label for="tracking-type">任务追踪方式</label>
-                    <select id="tracking-type" v-model="newTask.tracking_type">
-                        <option value="boolean">布尔型 (完成/未完成)</option>
-                        <option value="counter">计数型 (记录进度)</option>
-                    </select>
-                </div>
-                <div v-if="newTask.tracking_type === 'counter'" class="form-group">
-                    <label for="tracking-goal">计数目标</label>
-                    <input id="tracking-goal" type="number" v-model.number="newTask.tracking_goal" min="1">
-                </div>
-
-                <div class="form-actions">
-                    <button type="submit" class="btn-primary">添加任务</button>
-                </div>
-                <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
-            </form>
-        </div>
-
-        <!-- 任务列表 -->
-        <div class="card">
-            <h2>任务列表</h2>
-            <div v-for="(group, type) in groupedTasks" :key="type">
-                <h3>{{ taskTypeMap[type] }}</h3>
-                <ul class="task-list">
-                    <li v-for="task in group" :key="task.id">
-                        <div class="task-info">
-                            <strong>{{ task.name }}</strong>
-                            <span class="task-meta">({{ task.schedule_type }})</span>
-                        </div>
-                        <button @click="deleteTask(task.id)" class="btn-danger btn-small">删除</button>
-                    </li>
-                </ul>
+          <div v-if="form.tracking_mode === 'counter'" class="config-box">
+            <label>默认目标值</label>
+            <input type="number" v-model.number="form.tracking_config.goal" min="1">
+            <label>目标覆盖规则 (可选)</label>
+            <div v-for="(override, index) in form.tracking_config.overrides" :key="index" class="sub-config">
+              如果小号目标包含 <input type="text" v-model="override.if_goal_contains">, 则目标变为 <input type="number" v-model.number="override.new_goal">
+              <button type="button" @click="removeOverride(index)">-</button>
             </div>
+            <button type="button" @click="addOverride">+ 添加覆盖规则</button>
+          </div>
+
+          <div v-if="form.tracking_mode === 'round_based_counter'" class="config-box">
+            <label>每轮目标次数</label>
+            <input type="number" v-model.number="form.tracking_config.goal_per_round" min="1">
+            <label>轮次刷新日 (可多选)</label>
+            <div class="checkbox-group">
+              <!-- FIX: Added :key="d" -->
+              <label v-for="d in 7" :key="d"><input type="checkbox" :value="d" v-model="form.tracking_config.reset_days"> 周{{ '一二三四五六日'[d-1] }}</label>
+            </div>
+            <label>轮次刷新时间 (小时)</label>
+            <input type="number" v-model.number="form.tracking_config.reset_hour" min="0" max="23">
+          </div>
+        </fieldset>
+
+        <!-- 高级规则 -->
+        <fieldset>
+          <legend>4. 高级规则 (可选)</legend>
+          <div class="form-group">
+            <label>激活条件: 仅当小号目标包含此关键词时出现</label>
+            <input type="text" v-model="form.activation_condition.contains" placeholder="如：碎片">
+          </div>
+          <div class="form-group">
+            <label>消耗资源: 关联一个资源池的名称</label>
+            <input type="text" v-model="form.consumes_resource" placeholder="如：漂流次数">
+          </div>
+        </fieldset>
+
+        <div class="form-actions">
+          <button type="submit" class="btn-primary">添加任务</button>
         </div>
+        <p v-if="errorMessage" class="error-message">{{ errorMessage }}</p>
+      </form>
     </div>
+
+    <!-- 任务列表 -->
+    <div class="card">
+        <h2>任务列表</h2>
+        <!-- ... 列表展示部分可以简化或保持原样 ... -->
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, onMounted, computed } from 'vue';
+import { ref, watch } from 'vue';
 import apiClient from '@/api/axios';
 
-const tasks = ref([]);
 const errorMessage = ref('');
-const newTask = ref({
-    name: '',
-    type: '',
-    schedule_type: '',
-    schedule_config: '',
-    tracking_type: 'boolean',
-    tracking_goal: 1
+
+const getInitialForm = () => ({
+  name: '',
+  category: '',
+  schedule_rule: { type: 'daily', config: { reset_hour: 4 } },
+  tracking_mode: 'boolean',
+  tracking_config: { goal: 1, overrides: [] },
+  activation_condition: { contains: '' },
+  consumes_resource: ''
 });
 
-const taskTypeMap = {
-    daily: '日常任务',
-    weekly: '周常任务',
-    version: '版本/活动任务'
+const form = ref(getInitialForm());
+
+// 监听类型变化，重置配置对象以避免数据污染
+watch(() => form.value.schedule_rule.type, (newType) => {
+  if (newType === 'daily') form.value.schedule_rule.config = { reset_hour: 4 };
+  if (newType === 'weekly') form.value.schedule_rule.config = { start: { day: 2, hour: 4 }, end: { day: 1, hour: 4 } };
+  if (newType === 'date_range') form.value.schedule_rule.config = { start: '', end: '' };
+});
+
+watch(() => form.value.tracking_mode, (newMode) => {
+    if (newMode === 'boolean') form.value.tracking_config = {};
+    if (newMode === 'counter') form.value.tracking_config = { goal: 1, overrides: [] };
+    if (newMode === 'round_based_counter') form.value.tracking_config = { goal_per_round: 5, reset_days: [], reset_hour: 4 };
+});
+
+const addOverride = () => {
+  form.value.tracking_config.overrides.push({ if_goal_contains: '', new_goal: 1 });
 };
-
-const fetchTasks = async () => {
-    try {
-        const response = await apiClient.get('/tasks');
-        tasks.value = response.data.data;
-    } catch (error) {
-        console.error("获取任务模板失败:", error);
-        errorMessage.value = '无法加载任务列表。';
-    }
-};
-
-onMounted(fetchTasks);
-
-const resetForm = () => {
-    newTask.value = {
-        name: '',
-        type: '',
-        schedule_type: '',
-        schedule_config: '',
-        tracking_type: 'boolean',
-        tracking_goal: 1
-    };
-    errorMessage.value = '';
+const removeOverride = (index) => {
+  form.value.tracking_config.overrides.splice(index, 1);
 };
 
 const addTask = async () => {
-    errorMessage.value = '';
-    try {
-        // 准备要发送的数据
-        const payload = { ...newTask.value };
-        // 如果 schedule_config 为空，则发送 null
-        if (!payload.schedule_config) {
-            payload.schedule_config = null;
-        }
-        // 如果不是计数器类型，则不发送 goal
-        if (payload.tracking_type !== 'counter') {
-            delete payload.tracking_goal;
-        }
+  errorMessage.value = '';
+  try {
+    // 准备要发送的 payload，将对象转换为 JSON 字符串
+    const payload = {
+      ...form.value,
+      schedule_rule: JSON.stringify(form.value.schedule_rule),
+      tracking_config: JSON.stringify(form.value.tracking_config),
+      // 只有当用户填写了内容时，才发送这两个可选字段
+      activation_condition: form.value.activation_condition.contains ? JSON.stringify({type: 'goal_dependency', ...form.value.activation_condition}) : null,
+      consumes_resource: form.value.consumes_resource || null,
+    };
 
-        await apiClient.post('/tasks', payload);
-        resetForm();
-        await fetchTasks();
-    } catch (error) {
-        errorMessage.value = error.response?.data?.error || '添加失败，请检查输入。';
-        console.error("添加任务模板失败:", error);
-    }
+    await apiClient.post('/tasks', payload);
+    alert('任务添加成功!');
+    form.value = getInitialForm(); // 重置表单
+    // fetchTasks(); // 如果有列表，重新获取
+  } catch (error) {
+    errorMessage.value = error.response?.data?.error || '添加失败，请检查输入。';
+  }
 };
-
-const deleteTask = async (taskId) => {
-    if (confirm('确定要删除这个任务模板吗？所有相关的历史状态记录也将被删除。')) {
-        try {
-            await apiClient.delete(`/tasks/${taskId}`);
-            await fetchTasks();
-        } catch (error) {
-            errorMessage.value = error.response?.data?.error || '删除失败';
-            console.error("删除任务模板失败:", error);
-        }
-    }
-};
-
-const groupedTasks = computed(() => {
-    return tasks.value.reduce((acc, task) => {
-        (acc[task.type] = acc[task.type] || []).push(task);
-        return acc;
-    }, {});
-});
 </script>
 
 <style scoped>
-.form-group {
-    margin-bottom: 1.5rem;
-}
-.form-group label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 500;
-}
-.form-divider {
-    border: none;
-    border-top: 1px solid #eee;
-    margin: 2rem 0;
-}
-.form-actions {
-    margin-top: 1.5rem;
-}
-.config-helper {
-    background-color: #f8f9fa;
-    border: 1px solid #e9ecef;
-    border-radius: 4px;
-    padding: 0.5rem 1rem;
-    margin-bottom: 0.5rem;
-    font-size: 0.9rem;
-}
-.config-helper pre {
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    color: #c0392b;
-    background-color: #fff;
-    padding: 0.5rem;
-    border-radius: 4px;
-}
-input, select, textarea {
-    width: 100%;
-    padding: 0.6rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    box-sizing: border-box;
-}
-.task-list {
-    list-style: none;
-    padding: 0;
-}
-.task-list li {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.8rem;
-    background-color: #f9f9f9;
-    border-radius: 4px;
-    margin-bottom: 0.5rem;
-}
-.task-info {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-.task-meta {
-    font-size: 0.8rem;
-    color: #777;
-    background-color: #e9ecef;
-    padding: 0.2rem 0.5rem;
-    border-radius: 10px;
-}
-.error-message {
-    color: #e74c3c;
-    margin-top: 1rem;
-}
-.btn-small {
-    padding: 0.3rem 0.8rem;
-    font-size: 0.8rem;
-}
+fieldset { border: 1px solid #ddd; padding: 1.5rem; margin-bottom: 1.5rem; border-radius: 8px; }
+legend { font-weight: bold; color: #2c3e50; padding: 0 0.5rem; }
+.form-group { margin-bottom: 1rem; }
+.config-box { background-color: #f8f9fa; border: 1px solid #e9ecef; padding: 1rem; margin-top: 1rem; border-radius: 4px; display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; }
+.sub-config { display: flex; gap: 0.5rem; align-items: center; width: 100%; }
+.checkbox-group { display: flex; gap: 1rem; }
+input[type="text"], input[type="number"], select, input[type="datetime-local"] { padding: 0.5rem; border-radius: 4px; border: 1px solid #ccc; }
+.form-actions { margin-top: 1.5rem; }
+.error-message { color: #e74c3c; margin-top: 1rem; }
 </style>
