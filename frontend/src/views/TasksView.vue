@@ -35,12 +35,14 @@
           <div v-if="form.schedule_rule.type === 'weekly'" class="config-box">
             <label>开始于:</label>
             <select v-model.number="form.schedule_rule.config.start.day">
-              <option v-for="d in 7" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+              <!-- FIX: Added :key="d" -->
+              <option v-for="d in 7" :key="d" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
             </select>
             <input type="number" v-model.number="form.schedule_rule.config.start.hour" min="0" max="23"> 时
             <label>结束于:</label>
             <select v-model.number="form.schedule_rule.config.end.day">
-              <option v-for="d in 7" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+              <!-- FIX: Added :key="d" -->
+              <option v-for="d in 7" :key="d" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
             </select>
             <input type="number" v-model.number="form.schedule_rule.config.end.hour" min="0" max="23"> 时
           </div>
@@ -77,6 +79,7 @@
             <input type="number" v-model.number="form.tracking_config.goal_per_round" min="1">
             <label>轮次刷新日 (可多选)</label>
             <div class="checkbox-group">
+              <!-- FIX: Added :key="d" -->
               <label v-for="d in 7" :key="d"><input type="checkbox" :value="d" v-model="form.tracking_config.reset_days"> 周{{ '一二三四五六日'[d-1] }}</label>
             </div>
             <label>轮次刷新时间 (小时)</label>
