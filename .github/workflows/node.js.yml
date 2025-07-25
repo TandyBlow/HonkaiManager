@@ -1,0 +1,63 @@
+# 这个文件的名字，会显示在 GitHub 的 Actions 标签页里
+name: Node.js CI
+
+# 定义触发这个工作流的事件
+on:
+  # 当有代码推送到 main 分支时
+  push:
+    branches: [ "main" ]
+  # 当有针对 main 分支的 Pull Request 被创建或更新时
+  pull_request:
+    branches: [ "main" ]
+
+# 定义具体的工作任务
+jobs:
+  # 我们定义一个名为 "build" 的任务
+  build:
+    # 这个任务将运行在最新版的 Ubuntu 虚拟机上
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        # 定义一个构建矩阵：下面的步骤将在这些 Node.js 版本上各运行一遍
+        # 这能确保你的代码在主流 Node.js 版本上都能正常工作
+        node-version: [18.x, 20.x] 
+
+    # 定义这个任务需要执行的具体步骤
+    steps:
+    # 第1步：检出代码
+    # 这是固定操作，把你的仓库代码下载到虚拟机里，以便后续操作
+    - uses: actions/checkout@v4
+
+    # 第2步：设置 Node.js 环境
+    - name: Use Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        # 使用上面 matrix 中定义的 Node.js 版本
+        node-version: ${{ matrix.node-version }}
+        # 开启依赖缓存。这是一个重要的优化！
+        # 它会缓存 node_modules 目录，下次运行时如果 package-lock.json 没变，
+        # 就不用重新下载所有依赖，能极大加快运行速度。
+        cache: 'npm'
+        # 缓存目录需要指定，因为你的 package-lock.json 不在根目录
+        cache-dependency-path: |
+          frontend/package-lock.json
+          backend/package-lock.json
+
+    # 第3步：安装前端依赖并构建
+    - name: Install Frontend Dependencies & Build
+      # 指定工作目录，下面的命令会在这里执行
+      working-directory: ./frontend 
+      run: |
+        npm ci
+        npm run build --if-present
+
+    # 第4步：安装后端依赖
+    - name: Install Backend Dependencies
+      working-directory: ./backend
+      run: npm ci
+
+    # 第5步：运行测试 (如果你的项目有的话)
+    # 这一步是可选的，但非常推荐。
+    # - name: Run Tests
+    #   run: npm test
