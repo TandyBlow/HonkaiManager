@@ -4,45 +4,47 @@
     <h1>今日任务看板</h1>
     <p>点击任务可更新状态。计数类任务会提示输入进度。</p>
     
-    <button @click="fetchDashboardData" class="btn-secondary refresh-btn">
-      <i class="icon-refresh"></i> 刷新列表
-    </button>
+    <button @click="fetchDashboardData" class="btn-secondary refresh-btn">刷新列表</button>
     
     <div v-if="loading" class="loading">正在加载...</div>
     <div v-if="error" class="error-message">{{ error }}</div>
 
     <div v-if="!loading && !error" class="dashboard-grid">
-      <!-- 遍历每个小号 -->
       <div v-for="account in dashboardData" :key="account.id" class="card account-card">
         <h3>{{ account.nickname }}</h3>
         
-        <div v-if="!account.tasks || account.tasks.length === 0" class="all-done">
-          今日无任务
-        </div>
-        <div v-else-if="areAllTasksDone(account)" class="all-done">
-          🎉 今日任务已全部完成!
-        </div>
+        <div v-if="!account.tasks || account.tasks.length === 0" class="all-done">今日无任务</div>
+        <div v-else-if="areAllTasksDone(account)" class="all-done">🎉 今日任务已全部完成!</div>
         
         <ul v-else class="task-list">
           <li 
             v-for="task in account.tasks" 
             :key="task.id"
             class="task-item"
-            :class="{ 'completed': task.is_completed }"
+            :class="{ 'completed': task.status === 'completed' }"
             @click="handleTaskClick(account, task)"
           >
-            <!-- 布尔型任务 -->
-            <div v-if="task.tracking_type === 'boolean'" class="task-content">
+            <!-- 布尔型 -->
+            <div v-if="task.tracking_mode === 'boolean'" class="task-content">
               <span>{{ task.name }}</span>
             </div>
 
-            <!-- 计数型任务 -->
-            <div v-else-if="task.tracking_type === 'counter'" class="task-content counter">
+            <!-- 计数型 -->
+            <div v-else-if="task.tracking_mode === 'counter'" class="task-content counter">
               <div class="counter-info">
                 <span>{{ task.name }}</span>
-                <span class="progress-text">{{ task.progress }} / {{ task.tracking_goal }}</span>
+                <span class="progress-text">{{ task.progress.current || 0 }} / {{ task.final_goal }}</span>
               </div>
-              <progress class="progress-bar" :value="task.progress" :max="task.tracking_goal"></progress>
+              <progress class="progress-bar" :value="task.progress.current || 0" :max="task.final_goal"></progress>
+            </div>
+            
+            <!-- 轮次计数型 -->
+            <div v-else-if="task.tracking_mode === 'round_based_counter'" class="task-content counter">
+              <div class="counter-info">
+                <span>{{ task.name }}</span>
+                <span class="progress-text">{{ task.progress.is_debt ? '补打上轮' : '本轮' }}: {{ task.progress.current || 0 }} / {{ task.progress.goal }}</span>
+              </div>
+              <progress class="progress-bar" :value="task.progress.current || 0" :max="task.progress.goal"></progress>
             </div>
           </li>
         </ul>
@@ -66,7 +68,6 @@ const fetchDashboardData = async () => {
     const response = await apiClient.get('/dashboard/tasks');
     dashboardData.value = response.data.data;
   } catch (err) {
-    console.error('获取看板数据失败:', err);
     error.value = '无法加载看板数据，请确保后端服务正在运行。';
   } finally {
     loading.value = false;
@@ -75,79 +76,63 @@ const fetchDashboardData = async () => {
 
 onMounted(fetchDashboardData);
 
-// 统一的任务点击处理器
+const updateTaskStatus = async (account, task, newProgress) => {
+  try {
+    await apiClient.post('/task-status/update', {
+      account_id: account.id,
+      task_id: task.id,
+      new_progress: newProgress
+    });
+    // 成功后刷新整个看板以获取最新状态
+    await fetchDashboardData();
+  } catch (err) {
+    alert('操作失败，请刷新后重试。');
+    // 可以在这里做UI回滚，但刷新是更稳妥的方式
+    await fetchDashboardData();
+  }
+};
+
 const handleTaskClick = (account, task) => {
-  if (task.tracking_type === 'counter') {
-    updateCounterTask(account, task);
-  } else {
-    updateBooleanTask(account, task);
+  switch (task.tracking_mode) {
+    case 'boolean': {
+      const newStatus = task.status === 'completed' ? false : true;
+      // 乐观更新UI
+      task.status = newStatus ? 'completed' : 'incomplete';
+      updateTaskStatus(account, task, { completed: newStatus });
+      break;
+    }
+    case 'counter': {
+      const current = task.progress.current || 0;
+      const newCurrentStr = prompt(`更新【${task.name}】的进度`, current);
+      if (newCurrentStr === null) return;
+      const newCurrent = parseInt(newCurrentStr, 10);
+      if (isNaN(newCurrent)) return alert('请输入有效数字');
+      
+      // 乐观更新UI
+      task.progress.current = newCurrent;
+      task.status = newCurrent >= task.final_goal ? 'completed' : 'incomplete';
+      updateTaskStatus(account, task, { current: newCurrent });
+      break;
+    }
+    case 'round_based_counter': {
+      // 轮次任务逻辑复杂，最好总是从后端获取最新状态，所以这里只触发更新
+      const current = task.progress.current || 0;
+      const newCurrentStr = prompt(`更新【${task.name}】的进度`, current);
+      if (newCurrentStr === null) return;
+      const newCurrent = parseInt(newCurrentStr, 10);
+      if (isNaN(newCurrent)) return alert('请输入有效数字');
+
+      // 对于轮次任务，我们发送整个进度对象让后端处理
+      const newProgressPayload = { ...task.progress, current: newCurrent };
+      updateTaskStatus(account, task, newProgressPayload);
+      break;
+    }
   }
 };
 
-// 更新布尔型任务
-const updateBooleanTask = async (account, task) => {
-  const newStatus = task.is_completed ? 0 : 1;
-  
-  // 乐观更新 UI
-  task.is_completed = newStatus;
-
-  try {
-    await apiClient.post('/task-status/update', {
-      account_id: account.id,
-      task_id: task.id,
-      is_completed: newStatus
-    });
-  } catch (err) {
-    // 失败时回滚 UI
-    task.is_completed = !newStatus; 
-    console.error('更新布尔任务状态失败:', err);
-    alert('操作失败，请刷新后重试。');
-  }
-};
-
-// 更新计数型任务
-const updateCounterTask = async (account, task) => {
-  const currentProgress = task.progress || 0;
-  const newProgressStr = prompt(`更新【${task.name}】的进度`, currentProgress);
-
-  if (newProgressStr === null) return; // 用户取消
-
-  const newProgress = parseInt(newProgressStr, 10);
-  if (isNaN(newProgress) || newProgress < 0) {
-    alert('请输入一个有效的非负数字。');
-    return;
-  }
-
-  const oldProgress = task.progress;
-  const oldCompleted = task.is_completed;
-  const newCompleted = newProgress >= task.tracking_goal ? 1 : 0;
-
-  // 乐观更新 UI
-  task.progress = newProgress;
-  task.is_completed = newCompleted;
-
-  try {
-    await apiClient.post('/task-status/update', {
-      account_id: account.id,
-      task_id: task.id,
-      progress: newProgress,
-      is_completed: newCompleted
-    });
-  } catch (err) {
-    // 失败时回滚 UI
-    task.progress = oldProgress;
-    task.is_completed = oldCompleted;
-    console.error('更新计数任务状态失败:', err);
-    alert('操作失败，请刷新后重试。');
-  }
-};
-
-// 检查账号所有任务是否完成
 const areAllTasksDone = (account) => {
-  if (!account.tasks || account.tasks.length === 0) {
-    return true;
-  }
-  return account.tasks.every(task => task.is_completed);
+  if (!account.tasks || account.tasks.length === 0) return true;
+  return account.tasks.every(task => task.status === 'completed');
 };
 </script>
 

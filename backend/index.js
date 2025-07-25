@@ -11,229 +11,237 @@ app.use(cors());
 app.use(express.json());
 
 // =================================================================
-// 日期与规则计算辅助函数 (新核心)
+// 任务引擎核心 (The New Engine)
 // =================================================================
 
 /**
- * 根据当前时间获取任务日期 (每日4点刷新)
- * @param {Date} date - The date object to calculate from.
- * @returns {string} 'YYYY-MM-DD' 格式的日期字符串
+ * 获取任务日期 (每日4点刷新)
+ * @param {Date} date
+ * @returns {string} 'YYYY-MM-DD'
  */
 function getTaskDate(date = new Date()) {
   const d = new Date(date);
-  d.setHours(d.getHours() - 4); // 减去4小时
+  d.setHours(d.getHours() - 4);
   return d.toISOString().split('T')[0];
 }
 
 /**
- * 获取日期的周信息 (ISO 8601 标准: 周一为一周的开始)
+ * 获取ISO周信息 (周一为1, 周日为7)
  * @param {Date} date
- * @returns {{year: number, week: number}}
+ * @returns {{year: number, week: number, day: number}}
  */
 function getWeekInfo(date) {
     const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-    // 将 d 设为当周的周四，周数计算更稳定
     d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-    // 年初的周四
     const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-    // 计算周数
     const weekNo = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-    return { year: d.getUTCFullYear(), week: weekNo };
+    const dayOfWeek = date.getDay() === 0 ? 7 : date.getDay();
+    return { year: d.getUTCFullYear(), week: weekNo, day: dayOfWeek };
 }
 
 /**
- * 【规则引擎核心】根据任务规则和当前日期，计算任务的周期标识 (Period Key)
+ * 【引擎核心】根据任务规则和当前时间，计算任务的完整上下文
  * @param {object} task - 任务模板对象
+ * @param {object} account - 小号对象
  * @param {Date} now - 当前时间
- * @returns {string|null} - 如果任务今天激活，返回 Period Key；否则返回 null
+ * @returns {object|null} - 如果任务激活，返回上下文对象；否则返回 null
  */
-function getPeriodKey(task, now) {
-    const config = task.schedule_config ? JSON.parse(task.schedule_config) : {};
-    const { year, week } = getWeekInfo(now);
-    const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay(); // 1=周一, 7=周日
+function getTaskContext(task, account, now = new Date()) {
+    const scheduleRule = JSON.parse(task.schedule_rule);
+    const trackingConfig = JSON.parse(task.tracking_config);
+    const activationCondition = task.activation_condition ? JSON.parse(task.activation_condition) : null;
 
-    switch (task.schedule_type) {
-        case 'daily':
-            return getTaskDate(now);
-
-        case 'simple_weekly': // 例如：记忆战场 (周二4点 ~ 下周一4点)
-            const resetDay = config.reset_day_of_week || 1; // 默认为周一
-            const resetHour = config.reset_hour || 4;
-            
-            const weekStartDate = new Date(now);
-            // 计算本周重置点的具体时间
-            const daysUntilReset = resetDay - (weekStartDate.getDay() || 7);
-            weekStartDate.setDate(weekStartDate.getDate() + daysUntilReset);
-            weekStartDate.setHours(resetHour, 0, 0, 0);
-
-            if (now < weekStartDate) {
-                // 如果当前时间早于本周的重置点，说明属于上一周的周期
-                const lastWeek = new Date(now);
-                lastWeek.setDate(lastWeek.getDate() - 7);
-                const { year: lastYear, week: lastWeekNum } = getWeekInfo(lastWeek);
-                return `${lastYear}-W${lastWeekNum}`;
+    // 1. 检查激活条件
+    if (activationCondition) {
+        if (activationCondition.type === 'goal_dependency') {
+            const accountGoals = account.goals ? account.goals.split(',') : [];
+            if (!accountGoals.some(g => g.trim() === activationCondition.contains)) {
+                return null; // 不满足激活条件
             }
-            return `${year}-W${week}`;
+        }
+    }
 
-        case 'multi_period': // 例如：深渊 (一周两期)
-            for (let i = 0; i < config.periods.length; i++) {
-                const period = config.periods[i];
-                // 构建开始和结束时间
-                const start = new Date(now);
-                start.setDate(start.getDate() - (dayOfWeek - period.start.day));
-                start.setHours(period.start.hour, 0, 0, 0);
+    // 2. 检查调度规则 (活动窗口)
+    const { year, week, day } = getWeekInfo(now);
+    let period_key = null;
+    let isActive = false;
 
-                const end = new Date(now);
-                end.setDate(end.getDate() - (dayOfWeek - period.end.day));
-                end.setHours(period.end.hour, 0, 0, 0);
+    switch (scheduleRule.type) {
+        case 'daily':
+            isActive = true;
+            period_key = getTaskDate(now);
+            break;
+
+        case 'weekly': {
+            const { start, end } = scheduleRule.config;
+            const nowMs = now.getTime();
+
+            // 计算本周和上周的活动窗口
+            for (let weekOffset = 0; weekOffset >= -7; weekOffset -= 7) {
+                const checkDate = new Date(now);
+                checkDate.setDate(checkDate.getDate() + weekOffset);
                 
-                if (now >= start && now <= end) {
-                    return `${year}-W${week}-${i + 1}`; // 返回 'YYYY-Www-1' 或 'YYYY-Www-2'
+                const startDayOffset = start.day - (checkDate.getDay() || 7);
+                const endDayOffset = end.day - (checkDate.getDay() || 7) + (end.day < start.day ? 7 : 0);
+
+                const windowStart = new Date(checkDate);
+                windowStart.setDate(windowStart.getDate() + startDayOffset);
+                windowStart.setHours(start.hour, 0, 0, 0);
+
+                const windowEnd = new Date(checkDate);
+                windowEnd.setDate(windowEnd.getDate() + endDayOffset);
+                windowEnd.setHours(end.hour, 0, 0, 0);
+
+                if (nowMs >= windowStart.getTime() && nowMs < windowEnd.getTime()) {
+                    isActive = true;
+                    const { year: wYear, week: wWeek } = getWeekInfo(windowStart);
+                    period_key = `${wYear}-W${wWeek}`;
+                    break;
                 }
             }
-            return null; // 不在任何一期内
+            break;
+        }
 
-        default:
-            return null;
+        case 'date_range': {
+            const { start, end } = scheduleRule.config;
+            const nowMs = now.getTime();
+            if (nowMs >= new Date(start).getTime() && nowMs < new Date(end).getTime()) {
+                isActive = true;
+                period_key = `event-${task.id}`; // 对于长线活动，用任务ID作为周期标识
+            }
+            break;
+        }
     }
+
+    if (!isActive) return null;
+
+    // 3. 计算最终目标 (处理覆盖规则)
+    let finalGoal = trackingConfig.goal || 1;
+    if (trackingConfig.overrides) {
+        const accountGoals = account.goals ? account.goals.split(',') : [];
+        for (const override of trackingConfig.overrides) {
+            if (override.if_goal_contains && accountGoals.some(g => g.trim() === override.if_goal_contains)) {
+                finalGoal = override.new_goal;
+                break;
+            }
+        }
+    }
+
+    return {
+        ...task,
+        period_key,
+        final_goal: finalGoal,
+    };
 }
 
 
 // =================================================================
-// 小号 (Accounts) API - 保持不变
+// API Endpoints
 // =================================================================
-// GET: 获取所有小号列表
+
+// --- 小号管理 (Accounts) ---
 app.get('/api/accounts', (req, res) => {
-  const sql = "SELECT id, nickname, username, created_at FROM accounts ORDER BY created_at DESC";
-  db.all(sql, [], (err, rows) => {
-    if (err) return res.status(500).json({ "error": err.message });
-    res.json({ "message": "success", "data": rows });
-  });
+    db.all("SELECT * FROM accounts ORDER BY created_at DESC", [], (err, rows) => {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.json({ "message": "success", "data": rows });
+    });
 });
-// POST: 添加一个新的小号
+
 app.post('/api/accounts', (req, res) => {
-  const { nickname, username, password } = req.body;
-  if (!nickname || !username) return res.status(400).json({ "error": "昵称和账号是必填项" });
-  const sql = `INSERT INTO accounts (nickname, username, password) VALUES (?, ?, ?)`;
-  db.run(sql, [nickname, username, password], function(err) {
-    if (err) {
-      if (err.message.includes('UNIQUE constraint failed')) return res.status(400).json({ "error": "该昵称已存在" });
-      return res.status(500).json({ "error": err.message });
-    }
-    res.status(201).json({ "message": "success", "data": { id: this.lastID, nickname, username } });
-  });
+    const { nickname, username, password, goals } = req.body;
+    if (!nickname || !username) return res.status(400).json({ "error": "昵称和账号是必填项" });
+    const sql = `INSERT INTO accounts (nickname, username, password, goals) VALUES (?, ?, ?, ?)`;
+    db.run(sql, [nickname, username, password, goals], function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.status(201).json({ "message": "success", "data": { id: this.lastID, ...req.body } });
+    });
 });
-// DELETE: 删除一个小号
+
+app.put('/api/accounts/:id', (req, res) => {
+    const { nickname, username, password, goals } = req.body;
+    const sql = `UPDATE accounts SET nickname = ?, username = ?, password = ?, goals = ? WHERE id = ?`;
+    db.run(sql, [nickname, username, password, goals, req.params.id], function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.json({ "message": "success" });
+    });
+});
+
 app.delete('/api/accounts/:id', (req, res) => {
-  db.run('DELETE FROM accounts WHERE id = ?', req.params.id, function(err) {
-    if (err) return res.status(500).json({ "error": err.message });
-    if (this.changes === 0) return res.status(404).json({ "error": "找不到该ID的小号" });
-    res.json({ "message": `小号 ${req.params.id} 已删除`, "changes": this.changes });
-  });
+    db.run('DELETE FROM accounts WHERE id = ?', req.params.id, function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.json({ "message": `小号 ${req.params.id} 已删除` });
+    });
 });
 
-
-// =================================================================
-// 任务模板 (Tasks) API - 【重大修改】
-// =================================================================
-// GET: 获取所有任务模板
+// --- 任务模板管理 (Tasks) ---
 app.get('/api/tasks', (req, res) => {
     db.all("SELECT * FROM tasks", [], (err, rows) => {
         if (err) return res.status(500).json({ "error": err.message });
         res.json({ "message": "success", "data": rows });
     });
 });
-// POST: 添加一个新的任务模板
-app.post('/api/tasks', (req, res) => {
-    const { name, type, schedule_type, schedule_config, tracking_type, tracking_goal } = req.body;
-    if (!name || !type || !schedule_type) {
-        return res.status(400).json({ "error": "name, type, schedule_type 是必填项" });
-    }
-    // 简单的验证
-    try {
-        if (schedule_config) JSON.parse(schedule_config);
-    } catch(e) {
-        return res.status(400).json({ "error": "schedule_config 必须是合法的 JSON 字符串" });
-    }
 
-    const sql = `INSERT INTO tasks (name, type, schedule_type, schedule_config, tracking_type, tracking_goal) 
-                 VALUES (?, ?, ?, ?, ?, ?)`;
-    const params = [name, type, schedule_type, schedule_config, tracking_type, tracking_goal];
-    
+app.post('/api/tasks', (req, res) => {
+    const { name, category, schedule_rule, tracking_mode, tracking_config, activation_condition, consumes_resource } = req.body;
+    // Basic validation
+    try {
+        JSON.parse(schedule_rule);
+        JSON.parse(tracking_config);
+        if(activation_condition) JSON.parse(activation_condition);
+    } catch (e) {
+        return res.status(400).json({ "error": "规则或配置项必须是合法的JSON字符串" });
+    }
+    const sql = `INSERT INTO tasks (name, category, schedule_rule, tracking_mode, tracking_config, activation_condition, consumes_resource) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    const params = [name, category, schedule_rule, tracking_mode, tracking_config, activation_condition, consumes_resource];
     db.run(sql, params, function(err) {
-        if (err) {
-            if (err.message.includes('UNIQUE constraint failed')) return res.status(400).json({ "error": "该任务名称已存在" });
-            return res.status(500).json({ "error": err.message });
-        }
+        if (err) return res.status(500).json({ "error": err.message });
         res.status(201).json({ "message": "success", "data": { id: this.lastID, ...req.body } });
     });
 });
-// DELETE: 删除一个任务模板
-app.delete('/api/tasks/:id', (req, res) => {
-    db.run('DELETE FROM tasks WHERE id = ?', req.params.id, function(err) {
-        if (err) return res.status(500).json({ "error": err.message });
-        if (this.changes === 0) return res.status(404).json({ "error": "找不到该ID的任务模板" });
-        res.json({ "message": `任务模板 ${req.params.id} 已删除`, "changes": this.changes });
-    });
-});
 
+// ... (PUT and DELETE for tasks would be similar)
 
-// =================================================================
-// 核心功能 API (Dashboard & Task Status) - 【全新重构】
-// =================================================================
+// --- 核心功能 API (Dashboard & Task Status) ---
 
-// GET: 获取主页看板数据 (动态计算当天所有任务)
 app.get('/api/dashboard/tasks', async (req, res) => {
     try {
         const now = new Date();
 
-        // 1. 并行获取所有小号和所有任务模板
-        const [accounts, taskTemplates] = await Promise.all([
-            new Promise((resolve, reject) => db.all("SELECT id, nickname FROM accounts", [], (err, rows) => err ? reject(err) : resolve(rows))),
-            new Promise((resolve, reject) => db.all("SELECT * FROM tasks", [], (err, rows) => err ? reject(err) : resolve(rows)))
+        // 1. 获取所有基础数据
+        const [accounts, taskTemplates, allStatuses] = await Promise.all([
+            new Promise((resolve, reject) => db.all("SELECT * FROM accounts", [], (err, rows) => err ? reject(err) : resolve(rows))),
+            new Promise((resolve, reject) => db.all("SELECT * FROM tasks", [], (err, rows) => err ? reject(err) : resolve(rows))),
+            new Promise((resolve, reject) => db.all("SELECT * FROM task_status", [], (err, rows) => err ? reject(err) : resolve(rows)))
         ]);
-        
+
         if (accounts.length === 0) {
             return res.json({ "message": "success", "data": [] });
         }
 
-        // 2. 计算今天所有“激活”的任务及其 Period Keys
-        const activeTasks = taskTemplates.map(task => ({
-            ...task,
-            period_key: getPeriodKey(task, now)
-        })).filter(task => task.period_key !== null);
-
-        if (activeTasks.length === 0) {
-             // 如果今天没任务，直接返回空任务列表的小号数据
-            const dashboardData = accounts.map(acc => ({ ...acc, tasks: [] }));
-            return res.json({ "message": "success", "data": dashboardData });
-        }
-
-        // 3. 一次性获取所有小号在所有激活任务上的状态
-        const periodKeys = activeTasks.map(t => t.period_key);
-        const placeholders = periodKeys.map(() => '?').join(',');
-        const sql = `SELECT * FROM task_status WHERE period_key IN (${placeholders})`;
-        
-        const statuses = await new Promise((resolve, reject) => {
-            db.all(sql, periodKeys, (err, rows) => err ? reject(err) : resolve(rows));
-        });
-
-        // 4. 构建一个快速查找状态的 Map: 'account_id-task_id' -> status
+        // 2. 构建状态快速查找Map: 'account_id-task_id-period_key' -> status
         const statusMap = new Map();
-        statuses.forEach(s => {
-            statusMap.set(`${s.account_id}-${s.task_id}`, s);
+        allStatuses.forEach(s => {
+            statusMap.set(`${s.account_id}-${s.task_id}-${s.period_key}`, s);
         });
 
-        // 5. 组合最终数据
+        // 3. 为每个小号生成看板数据
         const dashboardData = accounts.map(account => {
-            const tasksForAccount = activeTasks.map(task => {
-                const status = statusMap.get(`${account.id}-${task.id}`);
+            const tasksForAccount = taskTemplates.map(task => {
+                // 3.1 计算任务上下文
+                const context = getTaskContext(task, account, now);
+                if (!context) return null; // 如果任务今天不激活，则忽略
+
+                // 3.2 获取任务状态
+                const statusRecord = statusMap.get(`${account.id}-${context.id}-${context.period_key}`);
+                const progress = statusRecord ? JSON.parse(statusRecord.progress || '{}') : {};
+                const status = statusRecord ? statusRecord.status : 'incomplete';
+
                 return {
-                    ...task, // 包含任务模板所有信息
-                    is_completed: status ? status.is_completed : 0,
-                    progress: status ? status.progress : 0,
+                    ...context, // 包含任务模板所有信息和计算出的上下文
+                    status,
+                    progress,
                 };
-            });
+            }).filter(Boolean); // 过滤掉不激活的任务
 
             return {
                 ...account,
@@ -248,44 +256,62 @@ app.get('/api/dashboard/tasks', async (req, res) => {
     }
 });
 
-// POST: 更新任务完成状态 (核心交互)
 app.post('/api/task-status/update', (req, res) => {
-    const { account_id, task_id, is_completed, progress } = req.body;
-    if (account_id === undefined || task_id === undefined || is_completed === undefined) {
-        return res.status(400).json({ "error": "缺少必要参数" });
-    }
-
-    // 1. 获取任务模板以计算 Period Key
+    const { account_id, task_id, new_progress } = req.body;
+    
     db.get("SELECT * FROM tasks WHERE id = ?", [task_id], (err, task) => {
-        if (err) return res.status(500).json({ "error": err.message });
-        if (!task) return res.status(404).json({ "error": "找不到该任务" });
+        if (err || !task) return res.status(404).json({ "error": "找不到任务" });
+        db.get("SELECT * FROM accounts WHERE id = ?", [account_id], (err, account) => {
+            if (err || !account) return res.status(404).json({ "error": "找不到小号" });
 
-        // 2. 计算 Period Key
-        const period_key = getPeriodKey(task, new Date());
-        if (!period_key) {
-            return res.status(400).json({ "error": "该任务当前不处于激活周期，无法更新" });
-        }
+            const context = getTaskContext(task, account, new Date());
+            if (!context) return res.status(400).json({ "error": "任务当前不处于激活周期" });
 
-        // 3. 使用 UPSERT 逻辑更新或插入状态
-        const upsertSql = `
-            INSERT INTO task_status (account_id, task_id, period_key, is_completed, progress) 
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(account_id, task_id, period_key) 
-            DO UPDATE SET is_completed = excluded.is_completed, progress = excluded.progress;
-        `;
-        // 注意: progress || 0 确保即使前端不传 progress，数据库也会存入 0 而不是 null
-        db.run(upsertSql, [account_id, task_id, period_key, is_completed, progress || 0], function(err) {
-            if (err) {
-                return res.status(500).json({ "error": `Upsert failed: ${err.message}` });
+            const { period_key, tracking_mode, final_goal } = context;
+            let progressToSave = {};
+            let statusToSave = 'incomplete';
+
+            // 根据追踪模式计算新状态
+            switch (tracking_mode) {
+                case 'boolean':
+                    statusToSave = new_progress.completed ? 'completed' : 'incomplete';
+                    progressToSave = {};
+                    break;
+                case 'counter':
+                    progressToSave = { current: new_progress.current, goal: final_goal };
+                    if (progressToSave.current >= final_goal) {
+                        statusToSave = 'completed';
+                    }
+                    break;
+                case 'round_based_counter':
+                    // 这是一个简化的实现，前端需要发送完整的进度对象
+                    progressToSave = new_progress; 
+                    // 假设前端已经计算好是否完成
+                    if (new_progress.is_current_round_completed) {
+                        statusToSave = 'completed';
+                    }
+                    break;
             }
-            res.json({ "message": "任务状态已更新" });
+
+            // 使用UPSERT更新数据库
+            const upsertSql = `
+                INSERT INTO task_status (account_id, task_id, period_key, status, progress) 
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, task_id, period_key) 
+                DO UPDATE SET status = excluded.status, progress = excluded.progress;
+            `;
+            
+            db.run(upsertSql, [account_id, task_id, period_key, statusToSave, JSON.stringify(progressToSave)], function(err) {
+                if (err) return res.status(500).json({ "error": `Upsert failed: ${err.message}` });
+                res.json({ "message": "任务状态已更新" });
+            });
         });
     });
 });
 
 
 app.get('/', (req, res) => {
-  res.send('欢迎来到崩坏3小号管理器后端！(V2 - 规则引擎版)');
+  res.send('欢迎来到崩坏3小号管理器后端！(V3 - 全新规则引擎版)');
 });
 
 app.listen(PORT, () => {

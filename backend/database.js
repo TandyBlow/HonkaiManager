@@ -14,13 +14,14 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 
 function createTables() {
   db.serialize(() => {
-    // 1. 小号表 (accounts) - 保持不变
+    // 1. 小号表 (accounts) - 新增 goals 字段
     db.run(`
       CREATE TABLE IF NOT EXISTS accounts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nickname TEXT NOT NULL UNIQUE,
         username TEXT NOT NULL,
         password TEXT,
+        goals TEXT, -- 用于存储培养目标关键词, e.g., "识律,乐土,碎片"
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `, (err) => {
@@ -28,54 +29,61 @@ function createTables() {
       else console.log('Table "accounts" created or already exists.');
     });
 
-    // 2. 任务模板表 (tasks) - 【重大修改】
-    // 注意：如果你已经有数据，直接修改表结构会比较复杂。
-    // 在开发阶段，最简单的方法是删除旧的 honkai_manager.db 文件，让程序重新生成。
+    // 2. 任务模板表 (tasks) - 【完全重构】
     db.run(`
       CREATE TABLE IF NOT EXISTS tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL UNIQUE,
-        type TEXT NOT NULL CHECK(type IN ('daily', 'weekly', 'version')),
+        category TEXT, -- 用于前端展示分组 ('日常', '周常', '活动')
         
-        -- 新增字段，用于规则引擎 --
-        schedule_type TEXT NOT NULL, -- 规则类型: 'daily', 'simple_weekly', 'multi_period'
-        schedule_config TEXT,      -- 规则配置 (JSON 字符串)
-        tracking_type TEXT NOT NULL DEFAULT 'boolean', -- 追踪方式: 'boolean', 'counter'
-        tracking_goal INTEGER DEFAULT 1                -- 计数器任务的目标值
+        -- 核心规则字段 (JSON格式) --
+        schedule_rule TEXT NOT NULL,      -- 调度规则 (活动窗口)
+        tracking_mode TEXT NOT NULL,      -- 追踪方式 ('boolean', 'counter', 'round_based_counter')
+        tracking_config TEXT NOT NULL,    -- 追踪配置 (目标, 覆盖规则, 轮次规则)
+        activation_condition TEXT,        -- 激活条件 (可选)
+        consumes_resource TEXT            -- 消耗资源 (可选, 关联资源池)
       )
     `, (err) => {
-      if (err) {
-        console.error('Error creating tasks table', err.message);
-      } else {
-        console.log('Table "tasks" created or already exists.');
-      }
+      if (err) console.error('Error creating tasks table', err.message);
+      else console.log('Table "tasks" created or already exists.');
     });
 
-    // 3. 任务状态表 (task_status) - 【重大修改】
+    // 3. 任务状态表 (task_status) - 【重构】
     db.run(`
       CREATE TABLE IF NOT EXISTS task_status (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         account_id INTEGER NOT NULL,
         task_id INTEGER NOT NULL,
+        period_key TEXT NOT NULL, -- 任务周期的唯一标识
         
-        -- 'task_date' 被 'period_key' 替换 --
-        period_key TEXT NOT NULL, -- 任务周期的唯一标识 (如 '2023-10-26' 或 '2023-W43-1')
-        
-        is_completed INTEGER NOT NULL DEFAULT 0,
-        progress INTEGER DEFAULT 0, -- 新增：用于 'counter' 类型的任务
+        status TEXT NOT NULL DEFAULT 'incomplete', -- 'incomplete', 'completed'
+        progress TEXT, -- 存储进度的JSON字符串, e.g., '{"current": 3, "goal": 5}'
         
         FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE,
         FOREIGN KEY (task_id) REFERENCES tasks (id) ON DELETE CASCADE,
-        
-        -- UNIQUE 约束更新 --
         UNIQUE(account_id, task_id, period_key)
       )
     `, (err) => {
-      if (err) {
-        console.error('Error creating task_status table', err.message);
-      } else {
-        console.log('Table "task_status" created or already exists.');
-      }
+      if (err) console.error('Error creating task_status table', err.message);
+      else console.log('Table "task_status" created or already exists.');
+    });
+
+    // 4. 资源池表 (resource_pools) - 【全新】
+    db.run(`
+        CREATE TABLE IF NOT EXISTS resource_pools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            resource_name TEXT NOT NULL,
+            current_value INTEGER NOT NULL,
+            max_value INTEGER NOT NULL,
+            reset_rule TEXT NOT NULL, -- 定义重置规则的JSON
+            last_reset_period TEXT,   -- 记录上次重置的周期，防止重复重置
+            FOREIGN KEY (account_id) REFERENCES accounts (id) ON DELETE CASCADE,
+            UNIQUE(account_id, resource_name)
+        )
+    `, (err) => {
+        if (err) console.error('Error creating resource_pools table', err.message);
+        else console.log('Table "resource_pools" created or already exists.');
     });
   });
 }
