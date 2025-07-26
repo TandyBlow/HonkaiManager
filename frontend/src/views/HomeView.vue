@@ -12,7 +12,11 @@
     <div v-if="!loading && !error" class="dashboard-grid">
       <div v-for="account in dashboardData" :key="account.id" class="card account-card">
         <h3>{{ account.nickname }}</h3>
-        
+        <div v-if="account.resource_pools && Object.keys(account.resource_pools).length > 0" class="resource-pools-display">
+          <span v-for="pool in account.resource_pools" :key="pool.id" class="pool-tag">
+            {{ pool.resource_name }}: {{ pool.current_value }} / {{ pool.max_value }}
+          </span>
+        </div>
         <div v-if="!account.tasks || account.tasks.length === 0" class="all-done">今日无任务</div>
         <div v-else-if="areAllTasksDone(account)" class="all-done">🎉 今日任务已全部完成!</div>
         
@@ -245,5 +249,21 @@ const areAllTasksDone = (account) => {
   padding: 1rem;
   background-color: #fdd;
   border-radius: 5px;
+}
+.resource-pools-display {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding-bottom: 1rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid #eee;
+}
+.pool-tag {
+  background-color: #eafaf1;
+  color: #27ae60;
+  padding: 0.3rem 0.7rem;
+  border-radius: 15px;
+  font-size: 0.85rem;
+  font-weight: 500;
 }
 </style>
