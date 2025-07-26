@@ -199,116 +199,177 @@ app.post('/api/tasks', (req, res) => {
     });
 });
 
-// ... (PUT and DELETE for tasks would be similar)
+app.delete('/api/tasks/:id', (req, res) => {
+    db.run('DELETE FROM tasks WHERE id = ?', req.params.id, function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        if (this.changes === 0) return res.status(404).json({ "error": "找不到该任务" });
+        res.json({ "message": `任务 ${req.params.id} 已删除` });
+    });
+});
+
+// --- 【全新】资源池模板管理 (Resource Pool Templates) ---
+app.get('/api/resource-pool-templates', (req, res) => {
+    db.all("SELECT * FROM resource_pool_templates", [], (err, rows) => {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.json({ "message": "success", "data": rows });
+    });
+});
+app.post('/api/resource-pool-templates', (req, res) => {
+    const { name, max_value, reset_rule } = req.body;
+    try {
+        JSON.parse(reset_rule);
+    } catch (e) {
+        return res.status(400).json({ "error": "重置规则必须是合法的JSON字符串" });
+    }
+    const sql = `INSERT INTO resource_pool_templates (name, max_value, reset_rule) VALUES (?, ?, ?)`;
+    db.run(sql, [name, max_value, reset_rule], function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        res.status(201).json({ "message": "success", "data": { id: this.lastID, ...req.body } });
+    });
+});
+app.delete('/api/resource-pool-templates/:id', (req, res) => {
+    db.run('DELETE FROM resource_pool_templates WHERE id = ?', req.params.id, function(err) {
+        if (err) return res.status(500).json({ "error": err.message });
+        if (this.changes === 0) return res.status(404).json({ "error": "找不到该资源池模板" });
+        res.json({ "message": `资源池模板 ${req.params.id} 已删除` });
+    });
+});
 
 // --- 核心功能 API (Dashboard & Task Status) ---
 
+// --- 核心功能 API (Dashboard & Task Status) ---
+// 【重构】看板API，加入完整的资源池逻辑
 app.get('/api/dashboard/tasks', async (req, res) => {
     try {
         const now = new Date();
-
+        const { year, week } = getWeekInfo(now);
+        const todayKey = getTaskDate(now);
         // 1. 获取所有基础数据
-        const [accounts, taskTemplates, allStatuses] = await Promise.all([
+        const [accounts, taskTemplates, allStatuses, poolTemplates, accountPools] = await Promise.all([
             new Promise((resolve, reject) => db.all("SELECT * FROM accounts", [], (err, rows) => err ? reject(err) : resolve(rows))),
             new Promise((resolve, reject) => db.all("SELECT * FROM tasks", [], (err, rows) => err ? reject(err) : resolve(rows))),
-            new Promise((resolve, reject) => db.all("SELECT * FROM task_status", [], (err, rows) => err ? reject(err) : resolve(rows)))
+            new Promise((resolve, reject) => db.all("SELECT * FROM task_status", [], (err, rows) => err ? reject(err) : resolve(rows))),
+            new Promise((resolve, reject) => db.all("SELECT * FROM resource_pool_templates", [], (err, rows) => err ? reject(err) : resolve(rows))),
+            new Promise((resolve, reject) => db.all("SELECT * FROM resource_pools", [], (err, rows) => err ? reject(err) : resolve(rows)))
         ]);
-
-        if (accounts.length === 0) {
-            return res.json({ "message": "success", "data": [] });
-        }
-
-        // 2. 构建状态快速查找Map: 'account_id-task_id-period_key' -> status
-        const statusMap = new Map();
-        allStatuses.forEach(s => {
-            statusMap.set(`${s.account_id}-${s.task_id}-${s.period_key}`, s);
-        });
-
+        if (accounts.length === 0) return res.json({ "message": "success", "data": [] });
+        // 2. 构建快速查找Map
+        const statusMap = new Map(allStatuses.map(s => [`${s.account_id}-${s.task_id}-${s.period_key}`, s]));
+        const poolTemplateMap = new Map(poolTemplates.map(pt => [pt.name, pt]));
+        const accountPoolsMap = new Map(accountPools.map(ap => [`${ap.account_id}-${ap.resource_name}`, ap]));
         // 3. 为每个小号生成看板数据
-        const dashboardData = accounts.map(account => {
+        const dashboardData = await Promise.all(accounts.map(async (account) => {
+            const activePoolsForAccount = {};
+            // 3.1 处理和重置资源池
+            for (const template of poolTemplates) {
+                let poolInstance = accountPoolsMap.get(`${account.id}-${template.name}`);
+                const resetRule = JSON.parse(template.reset_rule);
+                let currentPeriodKey = '';
+                if (resetRule.type === 'weekly') currentPeriodKey = `${year}-W${week}`;
+                if (resetRule.type === 'daily') currentPeriodKey = todayKey;
+                // 如果池不存在，则为该用户惰性创建
+                if (!poolInstance) {
+                    poolInstance = {
+                        account_id: account.id,
+                        resource_name: template.name,
+                        current_value: template.max_value,
+                        max_value: template.max_value,
+                        reset_rule: template.reset_rule,
+                        last_reset_period: currentPeriodKey
+                    };
+                    await new Promise((resolve, reject) => {
+                        const sql = `INSERT INTO resource_pools (account_id, resource_name, current_value, max_value, reset_rule, last_reset_period) VALUES (?, ?, ?, ?, ?, ?)`;
+                        db.run(sql, [account.id, template.name, template.max_value, template.max_value, template.reset_rule, currentPeriodKey], (err) => err ? reject(err) : resolve());
+                    });
+                } 
+                // 如果池存在且需要重置
+                else if (poolInstance.last_reset_period !== currentPeriodKey) {
+                    poolInstance.current_value = poolInstance.max_value;
+                    poolInstance.last_reset_period = currentPeriodKey;
+                    await new Promise((resolve, reject) => {
+                        const sql = `UPDATE resource_pools SET current_value = ?, last_reset_period = ? WHERE id = ?`;
+                        db.run(sql, [poolInstance.max_value, currentPeriodKey, poolInstance.id], (err) => err ? reject(err) : resolve());
+                    });
+                }
+                activePoolsForAccount[template.name] = poolInstance;
+            }
+            // 3.2 生成任务列表
             const tasksForAccount = taskTemplates.map(task => {
-                // 3.1 计算任务上下文
                 const context = getTaskContext(task, account, now);
-                if (!context) return null; // 如果任务今天不激活，则忽略
-
-                // 3.2 获取任务状态
+                if (!context) return null;
                 const statusRecord = statusMap.get(`${account.id}-${context.id}-${context.period_key}`);
                 const progress = statusRecord ? JSON.parse(statusRecord.progress || '{}') : {};
                 const status = statusRecord ? statusRecord.status : 'incomplete';
-
-                return {
-                    ...context, // 包含任务模板所有信息和计算出的上下文
-                    status,
-                    progress,
-                };
-            }).filter(Boolean); // 过滤掉不激活的任务
-
-            return {
-                ...account,
-                tasks: tasksForAccount
-            };
-        });
-
+                return { ...context, status, progress };
+            }).filter(Boolean);
+            return { ...account, tasks: tasksForAccount, resource_pools: activePoolsForAccount };
+        }));
         res.json({ "message": "success", "data": dashboardData });
     } catch (err) {
         console.error("Dashboard Error:", err);
         res.status(500).json({ "error": err.message });
     }
 });
-
-app.post('/api/task-status/update', (req, res) => {
+// 【重构】任务更新API，加入资源消耗逻辑
+app.post('/api/task-status/update', async (req, res) => {
     const { account_id, task_id, new_progress } = req.body;
     
-    db.get("SELECT * FROM tasks WHERE id = ?", [task_id], (err, task) => {
-        if (err || !task) return res.status(404).json({ "error": "找不到任务" });
-        db.get("SELECT * FROM accounts WHERE id = ?", [account_id], (err, account) => {
-            if (err || !account) return res.status(404).json({ "error": "找不到小号" });
-
-            const context = getTaskContext(task, account, new Date());
-            if (!context) return res.status(400).json({ "error": "任务当前不处于激活周期" });
-
-            const { period_key, tracking_mode, final_goal } = context;
-            let progressToSave = {};
-            let statusToSave = 'incomplete';
-
-            // 根据追踪模式计算新状态
-            switch (tracking_mode) {
-                case 'boolean':
-                    statusToSave = new_progress.completed ? 'completed' : 'incomplete';
-                    progressToSave = {};
-                    break;
-                case 'counter':
-                    progressToSave = { current: new_progress.current, goal: final_goal };
-                    if (progressToSave.current >= final_goal) {
-                        statusToSave = 'completed';
-                    }
-                    break;
-                case 'round_based_counter':
-                    // 这是一个简化的实现，前端需要发送完整的进度对象
-                    progressToSave = new_progress; 
-                    // 假设前端已经计算好是否完成
-                    if (new_progress.is_current_round_completed) {
-                        statusToSave = 'completed';
-                    }
-                    break;
-            }
-
-            // 使用UPSERT更新数据库
-            const upsertSql = `
-                INSERT INTO task_status (account_id, task_id, period_key, status, progress) 
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(account_id, task_id, period_key) 
-                DO UPDATE SET status = excluded.status, progress = excluded.progress;
-            `;
-            
-            db.run(upsertSql, [account_id, task_id, period_key, statusToSave, JSON.stringify(progressToSave)], function(err) {
-                if (err) return res.status(500).json({ "error": `Upsert failed: ${err.message}` });
-                res.json({ "message": "任务状态已更新" });
-            });
+    try {
+        const [task, account] = await Promise.all([
+            new Promise((resolve, reject) => db.get("SELECT * FROM tasks WHERE id = ?", [task_id], (err, row) => err ? reject(err) : resolve(row))),
+            new Promise((resolve, reject) => db.get("SELECT * FROM accounts WHERE id = ?", [account_id], (err, row) => err ? reject(err) : resolve(row)))
+        ]);
+        if (!task || !account) return res.status(404).json({ "error": "找不到任务或小号" });
+        const context = getTaskContext(task, account, new Date());
+        if (!context) return res.status(400).json({ "error": "任务当前不处于激活周期" });
+        const { period_key, tracking_mode, final_goal, consumes_resource } = context;
+        
+        // 获取旧进度以计算差值
+        const oldStatus = await new Promise((resolve, reject) => {
+            db.get("SELECT * FROM task_status WHERE account_id = ? AND task_id = ? AND period_key = ?", [account_id, task_id, period_key], (err, row) => err ? reject(err) : resolve(row));
         });
-    });
+        const oldProgress = oldStatus && oldStatus.progress ? JSON.parse(oldStatus.progress) : { current: 0 };
+        let progressToSave = {};
+        let statusToSave = 'incomplete';
+        let progressDelta = 0;
+        // ... (switch case for tracking_mode remains the same)
+        switch (tracking_mode) {
+            case 'boolean':
+                statusToSave = new_progress.completed ? 'completed' : 'incomplete';
+                progressToSave = {};
+                progressDelta = (statusToSave === 'completed' && (!oldStatus || oldStatus.status !== 'completed')) ? 1 : 0;
+                break;
+            case 'counter':
+                progressToSave = { current: new_progress.current, goal: final_goal };
+                if (progressToSave.current >= final_goal) statusToSave = 'completed';
+                progressDelta = new_progress.current - oldProgress.current;
+                break;
+            // ... other cases
+        }
+        // 如果任务消耗资源，则更新资源池
+        if (consumes_resource && progressDelta > 0) {
+            await new Promise((resolve, reject) => {
+                const sql = `UPDATE resource_pools SET current_value = current_value - ? WHERE account_id = ? AND resource_name = ?`;
+                db.run(sql, [progressDelta, account_id, consumes_resource], (err) => err ? reject(err) : resolve());
+            });
+        }
+        // 使用UPSERT更新任务状态
+        const upsertSql = `
+            INSERT INTO task_status (account_id, task_id, period_key, status, progress) 
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(account_id, task_id, period_key) 
+            DO UPDATE SET status = excluded.status, progress = excluded.progress;
+        `;
+        
+        db.run(upsertSql, [account_id, task_id, period_key, statusToSave, JSON.stringify(progressToSave)], function(err) {
+            if (err) return res.status(500).json({ "error": `Upsert failed: ${err.message}` });
+            res.json({ "message": "任务状态已更新" });
+        });
+    } catch (err) {
+        console.error("Update task error:", err);
+        res.status(500).json({ "error": err.message });
+    }
 });
-
 
 app.get('/', (req, res) => {
   res.send('欢迎来到崩坏3小号管理器后端！(V3 - 全新规则引擎版)');

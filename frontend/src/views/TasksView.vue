@@ -1,10 +1,10 @@
 <!-- frontend/src/views/TasksView.vue -->
 <template>
   <div class="tasks-view">
-    <h1>任务模板构造器</h1>
+    <h1>任务与资源管理</h1>
     
     <div class="card">
-      <h2>添加新任务模板</h2>
+      <h2>任务模板构造器</h2>
       <form @submit.prevent="addTask">
         <!-- 基础信息 -->
         <fieldset>
@@ -109,16 +109,59 @@
 
     <!-- 任务列表 -->
     <div class="card">
-        <h2>任务列表</h2>
-        <!-- ... 列表展示部分可以简化或保持原样 ... -->
+        <h2>任务模板列表</h2>
+        <ul class="item-list">
+        <li v-for="task in tasks" :key="task.id" class="item">
+          <div class="item-info">
+            <strong>{{ task.name }}</strong> (分类: {{ task.category || '无' }})
+            <details>
+              <summary>查看规则</summary>
+              <pre>{{ formatJson(task) }}</pre>
+            </details>
+          </div>
+          <button @click="deleteTask(task.id)" class="btn-danger">删除</button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- 资源池模板管理 -->
+    <div class="card">
+      <h2>资源池模板管理</h2>
+      <form @submit.prevent="addResourcePoolTemplate" class="resource-pool-form">
+        <input type="text" v-model="poolForm.name" placeholder="资源名称 (如: 漂流次数)" required>
+        <input type="number" v-model.number="poolForm.max_value" placeholder="最大值" required min="1">
+        <select v-model="poolForm.reset_rule.type" required>
+          <option value="daily">每日重置</option>
+          <option value="weekly">每周重置</option>
+        </select>
+        <div v-if="poolForm.reset_rule.type === 'weekly'">
+          在 <select v-model.number="poolForm.reset_rule.day">
+            <option v-for="d in 7" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+          </select>
+        </div>
+        在 <input type="number" v-model.number="poolForm.reset_rule.hour" min="0" max="23"> 时重置
+        <button type="submit" class="btn-primary">添加资源池</button>
+      </form>
+      <p v-if="poolErrorMessage" class="error-message">{{ poolErrorMessage }}</p>
+      
+      <ul class="item-list">
+        <li v-for="pool in resourcePools" :key="pool.id" class="item">
+          <div class="item-info">
+            <strong>{{ pool.name }}</strong> (总量: {{ pool.max_value }})
+            <small>重置规则: {{ JSON.parse(pool.reset_rule).type === 'weekly' ? `每周${'一二三四五六日'[JSON.parse(pool.reset_rule).day-1]}` : '每日' }} {{ JSON.parse(pool.reset_rule).hour }}点</small>
+          </div>
+          <button @click="deleteResourcePoolTemplate(pool.id)" class="btn-danger">删除</button>
+        </li>
+      </ul>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue';
+import { ref, watch, onMounted } from 'vue';
 import apiClient from '@/api/axios';
 
+const tasks = ref([]);
 const errorMessage = ref('');
 
 const getInitialForm = () => ({
@@ -153,6 +196,15 @@ const removeOverride = (index) => {
   form.value.tracking_config.overrides.splice(index, 1);
 };
 
+const fetchTasks = async () => {
+  try {
+    const response = await apiClient.get('/tasks');
+    tasks.value = response.data.data;
+  } catch (error) {
+    errorMessage.value = '无法加载任务列表。';
+  }
+};
+
 const addTask = async () => {
   errorMessage.value = '';
   try {
@@ -169,11 +221,87 @@ const addTask = async () => {
     await apiClient.post('/tasks', payload);
     alert('任务添加成功!');
     form.value = getInitialForm(); // 重置表单
-    // fetchTasks(); // 如果有列表，重新获取
+    await fetchTasks(); // 如果有列表，重新获取
   } catch (error) {
     errorMessage.value = error.response?.data?.error || '添加失败，请检查输入。';
   }
 };
+
+const deleteTask = async (id) => {
+  if (confirm('确定要删除这个任务模板吗？')) {
+    try {
+      await apiClient.delete(`/tasks/${id}`);
+      await fetchTasks();
+    } catch (error) {
+      errorMessage.value = '删除失败。';
+    }
+  }
+};
+const formatJson = (task) => {
+  const rules = {
+    schedule_rule: JSON.parse(task.schedule_rule),
+    tracking_mode: task.tracking_mode,
+    tracking_config: JSON.parse(task.tracking_config),
+    activation_condition: task.activation_condition ? JSON.parse(task.activation_condition) : null,
+    consumes_resource: task.consumes_resource
+  };
+  return JSON.stringify(rules, null, 2);
+};
+// --- 资源池模板逻辑 ---
+const resourcePools = ref([]);
+const poolErrorMessage = ref('');
+const getInitialPoolForm = () => ({
+  name: '',
+  max_value: null,
+  reset_rule: { type: 'weekly', day: 1, hour: 4 }
+});
+const poolForm = ref(getInitialPoolForm());
+watch(() => poolForm.value.reset_rule.type, (newType) => {
+    if (newType === 'daily') {
+        delete poolForm.value.reset_rule.day;
+    } else {
+        poolForm.value.reset_rule.day = 1;
+    }
+});
+const fetchResourcePools = async () => {
+  try {
+    const response = await apiClient.get('/resource-pool-templates');
+    resourcePools.value = response.data.data;
+  } catch (error) {
+    poolErrorMessage.value = '无法加载资源池列表。';
+  }
+};
+const addResourcePoolTemplate = async () => {
+  poolErrorMessage.value = '';
+  try {
+    const payload = {
+      ...poolForm.value,
+      reset_rule: JSON.stringify(poolForm.value.reset_rule)
+    };
+    await apiClient.post('/resource-pool-templates', payload);
+    poolForm.value = getInitialPoolForm();
+    await fetchResourcePools();
+  } catch (error) {
+    poolErrorMessage.value = error.response?.data?.error || '添加失败。';
+  }
+};
+const deleteResourcePoolTemplate = async (id) => {
+  if (confirm('确定要删除这个资源池模板吗？')) {
+    try {
+      await apiClient.delete(`/resource-pool-templates/${id}`);
+      await fetchResourcePools();
+    } catch (error) {
+      poolErrorMessage.value = '删除失败。';
+    }
+  }
+};
+// --- onMounted ---
+onMounted(() => {
+  fetchTasks();
+  fetchResourcePools();
+});
+
+
 </script>
 
 <style scoped>
@@ -186,4 +314,10 @@ legend { font-weight: bold; color: #2c3e50; padding: 0 0.5rem; }
 input[type="text"], input[type="number"], select, input[type="datetime-local"] { padding: 0.5rem; border-radius: 4px; border: 1px solid #ccc; }
 .form-actions { margin-top: 1.5rem; }
 .error-message { color: #e74c3c; margin-top: 1rem; }
+.item-list { list-style: none; padding: 0; }
+.item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border-bottom: 1px solid #eee; }
+.item-info { display: flex; flex-direction: column; gap: 0.5rem; }
+.item-info small { color: #777; }
+pre { background-color: #f4f4f4; padding: 0.5rem; border-radius: 4px; white-space: pre-wrap; word-break: break-all; }
+.resource-pool-form { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 1.5rem; }
 </style>

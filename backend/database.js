@@ -85,6 +85,19 @@ function createTables() {
         if (err) console.error('Error creating resource_pools table', err.message);
         else console.log('Table "resource_pools" created or already exists.');
     });
+
+    // 5. 资源池模板表 (resource_pool_templates) - 【全新】
+    db.run(`
+        CREATE TABLE IF NOT EXISTS resource_pool_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            max_value INTEGER NOT NULL,
+            reset_rule TEXT NOT NULL -- JSON: {"type": "weekly", "day": 1, "hour": 4}
+        )
+    `, (err) => {
+        if (err) console.error('Error creating resource_pool_templates table', err.message);
+        else console.log('Table "resource_pool_templates" created or already exists.');
+    });
   });
 }
 
