@@ -136,7 +136,7 @@
         </select>
         <div v-if="poolForm.reset_rule.type === 'weekly'">
           在 <select v-model.number="poolForm.reset_rule.day">
-            <option v-for="d in 7" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
+            <option v-for="d in 7" :key="d" :value="d">周{{ '一二三四五六日'[d-1] }}</option>
           </select>
         </div>
         在 <input type="number" v-model.number="poolForm.reset_rule.hour" min="0" max="23"> 时重置
